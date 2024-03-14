@@ -149,13 +149,21 @@ pub fn Mirror(comptime size: u32) type {
 
             return true;
         }
+
+        pub fn write_fd(self: *Self, fd: std.os.fd_t) !usize {
+            const buf = self.buffer();
+
+            const written = try std.os.write(fd, buf);
+
+            self.state.read += @intCast(written);
+            self.state.read &= MASK;
+
+            return written;
+        }
     };
 }
 
-const invariant = error{
-    read_out_of_range,
-    write_out_of_range,
-};
+const invariant = error{ read_out_of_range, write_out_of_range, not_inverted, inverted, not_empty };
 
 fn check_invariant(comptime size: u32, mirror: Mirror(size)) invariant!void {
     if (mirror.state.read >= size) {
@@ -166,6 +174,34 @@ fn check_invariant(comptime size: u32, mirror: Mirror(size)) invariant!void {
         return invariant.write_out_of_range;
     }
 }
+
+const Orientation = enum {
+    Std,
+    Inv,
+    Empty,
+
+    fn check(self: @This(), comptime size: u32, mirror: Mirror(size)) invariant!void {
+        switch (self) {
+            .Std => {
+                if (mirror.state.write < mirror.state.read) {
+                    return invariant.inverted;
+                }
+            },
+
+            .Inv => {
+                if (mirror.state.read < mirror.state.write) {
+                    return invariant.not_inverted;
+                }
+            },
+
+            .Empty => {
+                if (mirror.state.read != mirror.state.write) {
+                    return invariant.not_empty;
+                }
+            },
+        }
+    }
+};
 
 test "mirror basic usage" {
     var mirror = try Mirror(4096).new();
@@ -180,6 +216,7 @@ test "mirror basic usage" {
     try testing.expectEqual(state_t{ .read = 0, .write = 4 }, mirror.state);
     try testing.expectEqualSlices(u8, mirror.base[0..4], &buf);
     try check_invariant(4096, mirror);
+    try Orientation.Std.check(4096, mirror);
 
     try testing.expect(mirror.read(&out_buf));
     try testing.expectEqual(state_t{ .read = 4, .write = 4 }, mirror.state);
@@ -200,6 +237,7 @@ test "mirror wrap around usage" {
 
     try testing.expect(mirror.write(&buf));
     try check_invariant(4096, mirror);
+    try Orientation.Inv.check(4096, mirror);
 
     try testing.expectEqual(state_t{ .read = 4094, .write = 2 }, mirror.state);
     try testing.expectEqualSlices(u8, mirror.base[4094..4098], &buf);
@@ -222,6 +260,7 @@ test "contiguos buffer view in plain case" {
 
     try testing.expect(mirror.write(&buf));
     try check_invariant(4096, mirror);
+    try Orientation.Std.check(4096, mirror);
 
     try testing.expectEqual(mirror.base[17..21], mirror.buffer());
 }
@@ -238,6 +277,7 @@ test "contiguos buffer view in wrap around case" {
 
     try testing.expect(mirror.write(&buf));
     try check_invariant(4096, mirror);
+    try Orientation.Inv.check(4096, mirror);
 
     try testing.expectEqual(mirror.base[4094..4098], mirror.buffer());
 }
@@ -254,11 +294,70 @@ test "intentional drop data" {
 
     try testing.expect(mirror.write(&buf));
     try check_invariant(4096, mirror);
+    try Orientation.Inv.check(4096, mirror);
 
     try testing.expectEqual(mirror.base[4094..4098], mirror.buffer());
 
     try testing.expect(mirror.drop(2));
     try check_invariant(4096, mirror);
+}
+
+test "writting to fd" {
+    var mirror = try Mirror(4096).new();
+    defer mirror.close();
+
+    const mem_fd = try std.os.memfd_create("mirror-write", 0);
+    defer std.os.close(mem_fd);
+
+    const buf = [_]u8{ 0xfe, 0xed, 0xfa, 0xce };
+    try testing.expect(mirror.write(&buf));
+    try check_invariant(4096, mirror);
+    try Orientation.Std.check(4096, mirror);
+
+    const len = try mirror.write_fd(mem_fd);
+    try testing.expectEqual(4, len);
+    try check_invariant(4096, mirror);
+    try Orientation.Std.check(4096, mirror);
+
+    try std.os.lseek_SET(mem_fd, 0);
+
+    var mem_out: [16]u8 = undefined;
+
+    const r = try std.os.read(mem_fd, &mem_out);
+
+    try testing.expectEqual(4, r);
+
+    try testing.expectEqualSlices(u8, &buf, mem_out[0..4]);
+}
+
+test "writting to fd in wrap around case" {
+    var mirror = try Mirror(4096).new();
+    defer mirror.close();
+
+    mirror.state = state_t{ .read = 4094, .write = 4094 };
+
+    const mem_fd = try std.os.memfd_create("mirror-write", 0);
+    defer std.os.close(mem_fd);
+
+    const buf = [_]u8{ 0xfe, 0xed, 0xfa, 0xce };
+    try testing.expect(mirror.write(&buf));
+    try check_invariant(4096, mirror);
+    try Orientation.Inv.check(4096, mirror);
+
+    const len = try mirror.write_fd(mem_fd);
+    try testing.expectEqual(4, len);
+    try check_invariant(4096, mirror);
+    try Orientation.Empty.check(4096, mirror);
+
+    try std.os.lseek_SET(mem_fd, 0);
+
+    var mem_out: [16]u8 = undefined;
+
+    const r = try std.os.read(mem_fd, &mem_out);
+
+    try testing.expectEqual(4, r);
+
+    try testing.expectEqualSlices(u8, &buf, mem_out[0..4]);
 }
 
 test "mirror length" {
