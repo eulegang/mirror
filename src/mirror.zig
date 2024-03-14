@@ -160,6 +160,20 @@ pub fn Mirror(comptime size: u32) type {
 
             return written;
         }
+
+        pub fn read_fd(self: *Self, fd: std.os.fd_t) !usize {
+            var end = (self.state.read + size - 1) & MASK;
+            if (end < self.state.write) {
+                end += size;
+            }
+
+            const r = try std.os.read(fd, self.base[self.state.write..end]);
+
+            self.state.write += @intCast(r);
+            self.state.write &= MASK;
+
+            return r;
+        }
     };
 }
 
@@ -336,7 +350,7 @@ test "writting to fd in wrap around case" {
 
     mirror.state = state_t{ .read = 4094, .write = 4094 };
 
-    const mem_fd = try std.os.memfd_create("mirror-write", 0);
+    const mem_fd = try std.os.memfd_create("mirror-write-wrap", 0);
     defer std.os.close(mem_fd);
 
     const buf = [_]u8{ 0xfe, 0xed, 0xfa, 0xce };
@@ -358,6 +372,49 @@ test "writting to fd in wrap around case" {
     try testing.expectEqual(4, r);
 
     try testing.expectEqualSlices(u8, &buf, mem_out[0..4]);
+}
+
+test "reading from fd" {
+    var mirror = try Mirror(4096).new();
+    defer mirror.close();
+
+    const mem_fd = try std.os.memfd_create("mirror-read", 0);
+    defer std.os.close(mem_fd);
+
+    const buf = [_]u8{ 0xfe, 0xed, 0xfa, 0xce };
+
+    _ = try std.os.write(mem_fd, &buf);
+    try std.os.lseek_SET(mem_fd, 0);
+
+    const r = try mirror.read_fd(mem_fd);
+    try check_invariant(0x1000, mirror);
+    try Orientation.Std.check(0x1000, mirror);
+
+    try testing.expectEqual(4, r);
+
+    try testing.expectEqualSlices(u8, &buf, mirror.buffer());
+}
+
+test "reading from fd in wrap around case" {
+    var mirror = try Mirror(4096).new();
+    defer mirror.close();
+
+    mirror.state = state_t{ .read = 4094, .write = 4094 };
+    const mem_fd = try std.os.memfd_create("mirror-read-wrap", 0);
+    defer std.os.close(mem_fd);
+
+    const buf = [_]u8{ 0xfe, 0xed, 0xfa, 0xce };
+
+    _ = try std.os.write(mem_fd, &buf);
+    try std.os.lseek_SET(mem_fd, 0);
+
+    const r = try mirror.read_fd(mem_fd);
+    try check_invariant(0x1000, mirror);
+    try Orientation.Inv.check(0x1000, mirror);
+
+    try testing.expectEqual(4, r);
+
+    try testing.expectEqualSlices(u8, &buf, mirror.buffer());
 }
 
 test "mirror length" {
