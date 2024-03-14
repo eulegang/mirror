@@ -123,6 +123,17 @@ pub fn Mirror(comptime size: u32) type {
             return true;
         }
 
+        pub fn drop(self: *Self, num: usize) bool {
+            if (num > self.state.len(size)) {
+                return false;
+            }
+
+            self.state.read += @intCast(num);
+            self.state.read &= MASK;
+
+            return true;
+        }
+
         pub fn write(self: *Self, buf: []const u8) bool {
             if (buf.len > self.state.neg(size)) {
                 return false;
@@ -229,6 +240,25 @@ test "contiguos buffer view in wrap around case" {
     try check_invariant(4096, mirror);
 
     try testing.expectEqual(mirror.base[4094..4098], mirror.buffer());
+}
+
+// you may have already read the data by .buffer()
+test "intentional drop data" {
+    var mirror = try Mirror(4096).new();
+    defer mirror.close();
+
+    mirror.state = state_t{ .read = 4094, .write = 4094 };
+    try testing.expectEqual(0, mirror.len());
+
+    const buf = [_]u8{ 0xfe, 0xed, 0xfa, 0xce };
+
+    try testing.expect(mirror.write(&buf));
+    try check_invariant(4096, mirror);
+
+    try testing.expectEqual(mirror.base[4094..4098], mirror.buffer());
+
+    try testing.expect(mirror.drop(2));
+    try check_invariant(4096, mirror);
 }
 
 test "mirror length" {
