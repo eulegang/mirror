@@ -4,6 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    _ = b.addModule("mirror", .{
+        .root_source_file = .{ .path = "src/mirror.zig" },
+    });
+
     const lib = b.addStaticLibrary(.{
         .name = "mirror",
         .root_source_file = .{ .path = "src/mirror.zig" },
