@@ -2,6 +2,12 @@ const std = @import("std");
 const builtin = @import("builtin");
 const testing = std.testing;
 
+const Overlapper = @import("overlapper.zig").Overlapper;
+
+pub const Error = std.os.MMapError || std.os.TruncateError || error{
+    mem_fail,
+};
+
 const state_t = packed struct {
     read: u32,
     write: u32,
@@ -23,7 +29,6 @@ const state_t = packed struct {
 /// I wanted a thread save version but could not garentee writer safety,
 /// and thread saftey is not needed for my purposes
 pub fn Mirror(comptime size: u32) type {
-    const FULL: usize = 2 * @as(usize, size);
     const MASK: u32 = size - 1;
 
     if (@popCount(size) != 1) {
@@ -44,42 +49,13 @@ pub fn Mirror(comptime size: u32) type {
         base: []align(std.mem.page_size) u8,
         state: state_t,
 
-        pub fn new() !Self {
-            const fd = try std.os.memfd_create("mirror", std.os.MFD.CLOEXEC);
-            try std.os.ftruncate(fd, size);
+        pub fn new() Error!Self {
+            comptime var overlapper: Overlapper = switch (@import("builtin").link_libc) {
+                true => Overlapper.libc,
+                false => Overlapper.native,
+            };
 
-            const base = try std.os.mmap(
-                null,
-                FULL,
-                std.os.PROT.READ | std.os.PROT.WRITE,
-                .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
-                -1,
-                0,
-            );
-
-            _ = try std.os.mmap(
-                @ptrCast(base),
-                size,
-                std.os.PROT.READ | std.os.PROT.WRITE,
-                .{
-                    .TYPE = .PRIVATE,
-                },
-                fd,
-                0,
-            );
-
-            const b: [*]align(std.mem.page_size) u8 = @ptrCast(base);
-
-            _ = try std.os.mmap(
-                b + size,
-                size,
-                std.os.PROT.READ | std.os.PROT.WRITE,
-                .{
-                    .TYPE = .PRIVATE,
-                },
-                fd,
-                0,
-            );
+            const base = try overlapper.overlap(size);
 
             return Self{
                 .base = base,
@@ -433,4 +409,17 @@ test "mirror length" {
     state = state_t{ .read = 4000, .write = 1 };
     try testing.expectEqual(4193, state.len(0x2000));
     try testing.expectEqual(3998, state.neg(0x2000));
+}
+
+test "mirror property" {
+    var mirror = try Mirror(4096).new();
+    defer mirror.close();
+
+    mirror.base[0] = 0;
+    try testing.expectEqual(0, mirror.base[0]);
+    try testing.expectEqual(0, mirror.base[4096]);
+
+    mirror.base[0] = 42;
+    try testing.expectEqual(42, mirror.base[0]);
+    try testing.expectEqual(42, mirror.base[4096]);
 }
